@@ -1,0 +1,12 @@
+language: python
+python:
+- '2.7'
+script:
+- touch CHANGES.txt
+deploy:
+  provider: pypi
+  user: bryerton
+  password:
+    secure: Y1BXOxTHE0bIMlg8NtbhZ/BPPrq2p2NiyTquaXd2MioDqtdQwATGM+O3j5Q8WNoY09vBWVcMCU6Ccpfdr5yPD6CXh6joG+fLpC4y2paKIpoL4LUOvhDwJwEsoi46KSlcyk7n/B5IHY7lRTcH4KRrQwdF9tSQukQkEaO3GZxd1GlmiLUcSWsDFzc/HnnsYzZ+h74n6ZysQ4MTdDl8OC7eaou6gNBjxWXP3yumWoCweYNU9JtH2b/b9lj2iyNWj1236MgoOxLXTfHS0n1GaCII+FiMXU4pY3+IvWPEq4qrxAaNX962VwwjopWtPDv6CxvJPBhYW+pKCzwOA9g/2fYHoq3WJ+geVRVN2I3Vp22rpX+7NTRvA5GeBxeLAqsv6VxbVednrb+tYPCk+Mm0UpBkSFkCZrftS24LDhR0eMs6zvBtesKxPTpAW7OnWZFUrlQXTnvgySwRr1FhnDnjppbkh9ubjok7dnin/NLekYLwZ74AsJwoRi0kLRsfez3m8SgUEjSpvFtoE5zJK0iQwlYJ/ErCQwwTLsV0Fq0BW1YDRzNBy2kI3JZqV1m/q/RTvaVUZEG4PeZEFkdjM8ByAINBLJ/UUNi0cj7Jbjvmvo3f7QDEETlqF6TueYrHjHYun9BkMs+Z/7fkY6CRwIdV90onfp4uZQLmZcqAX3xFMsfbjGo=
+  on:
+    branch: master
