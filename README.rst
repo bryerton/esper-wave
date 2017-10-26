@@ -1,3 +1,6 @@
+.. image:: https://travis-ci.org/bryerton/esper-wave.svg?branch=master
+    :target: https://travis-ci.org/bryerton/esper-wave
+
 ==========
 ESPER WAVE
 ==========
