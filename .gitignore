@@ -1,4 +1,5 @@
 dist
 esper_wave.egg-info
 esper_wave/*.pyc
+esper_wave/__pycache__
 .pypirc

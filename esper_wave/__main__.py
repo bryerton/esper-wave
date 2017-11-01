@@ -5,12 +5,25 @@ from builtins import str as text
 
 import os
 import sys
-import requests
 import argparse
 import cmd
 import time
 import getpass
+import array
 import platform
+import configparser
+import zmq
+import socket
+import struct
+import re
+import zlib
+import pickle
+import queue
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui
+import numpy as np
+import time
+import msgpack
 from .version import __version__
 
 if(platform.system() == u'Windows'):
@@ -23,136 +36,115 @@ here = os.path.abspath(os.path.dirname(__file__))
 
 version = __version__
 
-def is_admin():
+MTU_SIZE = 1500
+        
+
+def getAuth(args, config):
+    username = False
+    password = False
+
+    if(args.user):
+        username = args.user
+        if(not args.password):
+            password = getpass.getpass("Password for " + username + ": ") 
+        else:
+            password = args.password
+    
+    else:
+        if(config.has_section('auth')):
+            if(config.has_option('auth','username')):
+                username = config.get('auth','username')
+
+            if(username):
+                if(config.has_option('auth','password')):
+                    password = config.get('auth','password')
+                else:
+                    password = getpass.getpass("Password for " + username + ": ") 
+        else:
+            # Config file has no value yet, might as well use the one passed in (or the default)
+            config.add_section('auth')
+            config.add_option('username', username)
+
+    return { 'username' : username, 'password' : password }
+
+class FEAMWaveform(object):
+    sample_count = 0
+    trigger_start = 0
+    trigger_delay = 0
+    waveform = array.array('B', [0] * (76*4*2*511))
+    waveform_len = 0
+
+    def __init__(self):
+        pass
+
+def getData(sub, q):
+    msg = recv_msgpack(sub, flags=zmq.NOBLOCK)
+    if(msg):
+        q.put(msg)
+
+class CaptureThread(QtCore.QThread):
+    finished = QtCore.pyqtSignal(object)
+
+    def __init__(self, sub, queue, parent=None):
+        QtCore.QThread.__init__(self, parent)      
+        self.queue = queue
+        self.sub = sub
+
+    def run(self):
+        while True:
+            getData(self.sub, self.queue)            
+
+def recv_msgpack(socket, flags=0, protocol=-1):
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
+        z = socket.recv(flags)
+        return msgpack.unpackb(z, use_list=False)
 
-def request_get_with_auth(url, params, user, password):
-    if(user):
-        return requests.get(url, params=params, auth=(user, password))
-    else:
-        return requests.get(url, params=params)
-
-def request_post_with_auth(url, params, payload, user, password):
-    if(user):
-        return requests.post(url, params=params, data=payload, auth=(user, password))
-    else:
-        return requests.post(url, params=params, data=payload)
-
-def set_default_subparser(self, name, args=None):
-    """default subparser selection. Call after setup, just before parse_args()
-    name: is the name of the subparser to call by default
-    args: if set is the argument list handed to parse_args()
-
-    , tested with 2.7, 3.2, 3.3, 3.4
-    it works with 2.6 assuming argparse is installed
-    """
-    subparser_found = False
-    for arg in sys.argv[1:]:
-        if arg in ['-h', '--help']:  # global help if no subparser
-            break
-    else:
-        for x in self._subparsers._actions:
-            if not isinstance(x, argparse._SubParsersAction):
-                continue
-            for sp_name in x._name_parser_map.keys():
-                if sp_name in sys.argv[1:]:
-                    subparser_found = True
-        if not subparser_found:
-            # insert default in first position, this implies no
-            # global options without a sub_parsers specified
-            if args is None:
-                sys.argv.insert(1, name)
-            else:
-                args.insert(0, name)
-
-class Esper(object):
-    ESPER_TYPE_NULL = 0
-
-    def getTypeString(self,esper_type):
-        options = {
-            0: "null",
-            1: "uint8",
-            2: "uint16",
-            3: "uint32",
-            4: "uint64",
-            5: "sint8",
-            6: "sint16",
-            7: "sint32",
-            8: "sint64",
-            9: "float32",
-            10: "float64",
-            11: "ascii",
-            12: "bool",
-            13: "raw"
-        }
-        return options.get(esper_type, "unknown")
-
-    def getOptionString(self, esper_option):
-        retStr = ""
-        if(esper_option & 0x01):
-            retStr = retStr + "R"
+    except Exception as e:
+        if (str(e) == str("Resource temporarily unavailable")):
+            # Socket not ready
+            return None
         else:
-            retStr = retStr + " "
+            # Oopsy other error re-raise
+            raise
 
-        if(esper_option & 0x02):
-            retStr = retStr + "W"
-        else:
-            retStr = retStr + " "
+q = queue.Queue()
+plotter = []
+feam_plot = [] 
 
-        if(esper_option & 0x04):
-            retStr = retStr + "H"
-        else:
-            retStr = retStr + " "
+# allocate a numpy array for the SCA plotter data
+plot_data = []
+for sca in range(4): 
+    plot_data.append( [] )
+    for ch in range(76):
+        plot_data[sca].append( np.zeros( 511, np.dtype('i2') ) )
 
-        if(esper_option & 0x08):
-            retStr = retStr + "S"
-        else:
-            retStr = retStr + " "
+def update():
+    global q, feam_plot, plotter
+    
+    while(not q.empty()):
+        msg = q.get()
+        # Lets do this! Fix up the waveform payload from the SCA into discrete waveforms
+        for sample in range(511):
+            sample_offset = sample * 76 * 4
+            for ch in range(76): 
+                ch_offset = ch * 4
+                for sca in range(4):   
+                    # SCA data arrangement
+                    # [SCA0_ch0_s0][SCA1_ch0_s0][SCA2_ch0_s0][SCA3_ch0_s0]
+                    # [SCA0_ch1_s0][SCA1_ch1_s0][SCA2_ch1_s0][SCA3_ch1_s0]
+                    # ...
+                    # [SCA0_ch75_s0][SCA1_ch75_s0][SCA2_ch75_s0][SCA3_ch75_s0]
+                    # [SCA0_ch0_s1][SCA1_ch0_s1][SCA2_ch0_s1][SCA3_ch0_s1]
+                    plot_data[sca][ch][sample] = msg[b'waveform'][ sample_offset + ch_offset + sca]
+                    
 
-        if(esper_option & 0x10):
-            retStr = retStr + "L"
-        else:
-            retStr = retStr + " "
-
-        if(esper_option & 0x20):
-            retStr = retStr + "W"
-        else:
-            retStr = retStr + " "
-
-        return retStr
-
-    def getStatusString(self, esper_status):
-        retStr = ""
-        if(esper_status & 0x01):
-            retStr = retStr + "L"
-        else:
-            retStr = retStr + " "
-
-        if(esper_status & 0x02):
-            retStr = retStr + "S"
-        else:
-            retStr = retStr + " "
-
-        if(esper_status & 0x04):
-            retStr = retStr + "D"
-        else:
-            retStr = retStr + " "
-
-        return retStr
+        for sca in range(4):
+            for ch in range(76):
+                  feam_plot[sca][ch].setData( plot_data[sca][ch] )    
 
 def main():
     try:
         prog='esper-wave'    
-
-        if(platform.system() == u'Windows'):
-            if not is_admin():
-                # Re-run the program with admin rights
-                ctypes.windll.shell32.ShellExecuteW(None, u"runas", text(sys.executable), text(sys.argv), None, 1)        
-
-        argparse.ArgumentParser.set_default_subparser = set_default_subparser
 
         parser = argparse.ArgumentParser(prog=prog)
 
@@ -160,122 +152,79 @@ def main():
         parser.add_argument('-v','--verbose', help="Verbose output", default=False, action='store_true')
         parser.add_argument('--version', action='version', version='%(prog)s ' + version)
 
-        # Sub parser for write,read
-        subparsers = parser.add_subparsers(title='commands', dest='command', description='Available Commands', help='Type '+prog+' [command] -h to see additional options')
-
-        # Experiment Mode
-        parser_experiment = subparsers.add_parser('experiment', help='<url>')
-        parser_experiment.add_argument("url", help="Node URL. ie: 'http://<hostname>:<port>'")
-        parser_experiment.add_argument("mid", nargs='?', default='0', help="Module Id or Key")
-        parser_experiment.add_argument("-u","--user", default=False, help="User for Auth")
-        parser_experiment.add_argument("-p","--password", default=False, help="Password for Auth")
+        parser.add_argument("-f", "--config", default="test.ini", help="Config file for node")
+        parser.add_argument("-s", "--storage", default="", help="Storage path for collected data")
+        parser.add_argument("-u", "--user", default=False, help="User for Auth")
+        parser.add_argument("-p", "--password", default=False, help="Password for Auth")
+        parser.add_argument("ip", help="IP address of node to pull data from")
+        #parser.add_argument("port", type=int, default=50005, help="Port of node to pull data from")
 
         # Put the arguments passed into args
-        parser.set_default_subparser('experiment')
         args = parser.parse_args()
 
-        # Strip trailing / off args.url
-        if(args.url[-1:] == '/'):
-            args.url = args.url[0:-1]
-        
-        # if url is missing 'http', add it
-        if((args.url[0:7] != 'http://') and (args.url[0:8] != 'https://')):
-            args.url = 'http://' + args.url
-
-        if(args.user):
-            if(not args.password):
-                args.password = getpass.getpass("Insert your password: ") 
-
-        # Attempt to connect to verify the ESPER service is reachable
-        querystring = {'mid': 'system'}
-        r = request_get_with_auth(args.url + '/read_module', querystring, args.user, args.password)
-        if(r.status_code == 200): 
-            try:
-                resp = r.json()
-            except:
-                print("Invalid response from ESPER service. Exiting")
-                sys.exit(1)
-
-            if(not 'key' in resp):
-                print("Old response from ESPER service. Exiting")
-                sys.exit(1)
-
-        else:
-            try:
-                err = r.json()
-                print('\tStatus: ' + str(err['error']['status']) + '\n\tCode: ' + str(err['error']['code']) + '\n\tMeaning: ' + err['error']['meaning'] + '\n\tMessage: ' + err['error']['message'] + '\n')
-                sys.exit(1)
-            except:
-                print("Non-JSON response from ESPER service. Exiting")
-                print(r.content)             
-                sys.exit(1)
-
         try: 
-            if(args.command == 'experiment'):
-                interactive = InteractiveMode()
-                interactive.url = args.url
-                interactive.prog = prog
-                interactive.user = args.user
-                interactive.password = args.password
-                
-                try:
-                    querystring = {'mid': 'system', 'vid': 'device', 'dataOnly':'y'}
-                    r = request_get_with_auth(args.url + '/read_var', querystring, args.user, args.password)
-                    if(r.status_code == 200): 
-                        interactive.host = r.json()
-                    else:
-                        err = r.json()
-                        print('\tStatus: ' + str(err['error']['status']) + '\n\tCode: ' + str(err['error']['code']) + '\n\tMeaning: ' + err['error']['meaning'] + '\n\tMessage: ' + err['error']['message'] + '\n')
-                        sys.exit(1)
+            # Load up config
+            # Create config instance
+            config = configparser.SafeConfigParser()
 
-                    querystring = {'mid': args.mid }
-                    r = request_get_with_auth(args.url + '/read_module', querystring, args.user, args.password)
-
-                    if(r.status_code == 200): 
-                        interactive.module = r.json()['key']
-                    else:
-                        querystring = {'mid': 'system' }
-                        r = request_get_with_auth(args.url + '/read_module', querystring, args.user, args.password)
-
-                        if(r.status_code == 200): 
-                            interactive.module = r.json()['key']
-                        else:
-                            err = r.json()
-                            print('\tStatus: ' + str(err['error']['status']) + '\n\tCode: ' + str(err['error']['code']) + '\n\tMeaning: ' + err['error']['meaning'] + '\n\tMessage: ' + err['error']['message'] + '\n')
-                            sys.exit(1)
-
-                    interactive.intro = "Connected to " + interactive.host +  "@" + args.url + "\nType 'help' for a list of available commands"
-                    interactive.prompt = '['+args.url+':/'+interactive.module +']> '
-                    interactive.get_modules()
-                    interactive.get_module_variables()
-                    interactive.cmdloop()
-                    sys.exit(0)
-                
-                except requests.exceptions.RequestException as e:
-                    print('Unable to connected to ESPER service at ' + args.url)
-                    print("Error: {}".format(e))
-                    sys.exit(1)
+            # Load configuration file
+            config.read(args.config)
         
-            else:
-                # No options selected, this should never be reached
-                sys.exit(0) 
-        
-        except requests.exceptions.Timeout:
-            # Maybe set up for a retry, or continue in a retry loop
-            print('Timed out attempting to communicate with ' + args.url + "\n")
-            sys.exit(1)
+            auth = getAuth(args, config)
 
-        except requests.exceptions.TooManyRedirects:
-            # Tell the user their URL was bad and try a different one
-            print('Timed out attempting to communicate with ' + args.url + "\n")
-            sys.exit(1)
+            # if a username has been defined, then a password *MUST* have been grabbed, perform authentication
+            if(auth['username']):
+                print(auth['username'] + ' ' + auth['password'])
 
-        except requests.exceptions.RequestException as e:
-            # catastrophic error. bail.
-            print('Uncaught error: ')
-            print(e)
-            sys.exit(1)
+            addr = re.split(' :', args.ip)
+            if(len(addr) < 2):
+                addr.append( 50006 )
 
+            # Setup 0MQ subscriber
+            context = zmq.Context()
+            sub = context.socket(zmq.SUB)
+            sub.setsockopt_string(zmq.IDENTITY, "Hello")
+            sub.setsockopt_string(zmq.SUBSCRIBE, "")
+            sub.connect("tcp://" + str(addr[0]) + ':' + str(addr[1]))
+
+            app = QtGui.QApplication([])
+
+            w = QtGui.QWidget()
+            layout = QtGui.QGridLayout()
+            w.setLayout(layout)
+
+            x = np.array([])
+            for n in range(511):
+                x = np.append( x, n )
+
+            for sca in range(4):
+                plotter.append( pg.PlotWidget() )
+                plotter[sca].setXRange(0,510)
+                plotter[sca].setYRange(-4096,4096)
+                layout.addWidget( plotter[sca] )
+                feam_plot.append( [] )
+                for n in range(76):
+                    feam_plot[sca].append( plotter[sca].plot(x, plot_data[sca][n], pen=(n, 76)) )  ## setting pen=None disables line drawing
+
+                #plotter[sca].show()
+            w.show()
+
+            timer = QtCore.QTimer()
+            timer.timeout.connect(update)
+            timer.start(100)            
+            
+            thread = CaptureThread(sub,q)
+            thread.start() 
+            QtGui.QApplication.instance().exec_()
+            thread.quit()            
+
+            # No options selected, this should never be reached
+            sys.exit(0) 
+
+        except Exception as err:
+            print(err)
+            sys.exit(1)
+              
     except KeyboardInterrupt:
         print("\nExiting " + prog)
         sys.exit(0)
