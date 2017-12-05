@@ -7,7 +7,7 @@ from os import path
 
 here = path.abspath(path.dirname(__file__))
 
-exec(open(path.join(here, 'esper_tool/version.py')).read())
+exec(open(path.join(here, 'esper_wave/version.py')).read())
 
 def readme():
     with open('README.rst') as f:
